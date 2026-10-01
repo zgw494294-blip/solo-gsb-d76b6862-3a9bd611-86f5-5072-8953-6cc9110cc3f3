@@ -182,6 +182,14 @@
 `label`，码点区间左闭右开 **[start, end)**），副本初始**无人持有**，持久化到
 随容器启动初始化的 **SQLite**（Compose 挂卷，重启后副本保留）。
 
+- **任意唯一字符串 id**：批注 `id` 接受**任意唯一字符串**，包括**空字符串**
+  `""` 与含 `/`、`%`、`?`、`#` 等保留字符的字符串（如 `审阅/1`、`a%2Fb`），
+  创建时**原样存储**、读取时**原样返回**，不做任何改写。经 URL 定位批注时，
+  路径段按**标准百分号编码**（`urllib.parse.quote(id, safe="")`）：`/` →
+  `%2F`、`%` → `%25`、空串 → 路径中**相邻的两个斜杠**。服务端只解码**一次**，
+  因此 id `a/b`（写作 `a%2Fb`）与字面 id `a%2Fb`（写作 `a%252Fb`）**不会
+  混同**；三条操作 URL 形如 `/api/copies/{id}/annotations/{编码后的ann_id}/claim`，
+  空串 id 的 PATCH 为 `.../annotations/`（以斜杠结尾）。
 - **连通组**：两条批注区间**正长度重叠**（`a.start < b.end` 且 `b.start < a.end`）
   即在二者间连边，取**传递连通组**；**相接**（`end == start`）**不连边**。
 - **领取 / 释放**：按批注 `id` 与**非空审阅者标识** `reviewer` 操作其所在**整组**
@@ -194,9 +202,10 @@
   - 新组**触及其他持有者**的批注 → 返回 **409**，**范围与持有权均不变**；
   - 原组被**拆开**时，各碎片**保留原持有者**；
   - 仅相接（不连边）不视为触及，不冲突。
-- **失败原子性**：非法输入（非字符串 / 空 `id`、空 `label`、`0 ≤ start < end ≤ 文本长度`
+- **失败原子性**：非法输入（非字符串 `id`、空 `label`、`0 ≤ start < end ≤ 文本长度`
   不满足、重复 `id`、空 `reviewer` 等）返回 **422**；任何失败（422 / 409 / 404）
-  **都不改变副本**。
+  **都不改变副本**。注意**空字符串 `id` 是合法的唯一字符串**（不是非法输入），
+  通过相邻两个斜杠的 URL 定位（见上）。
 - **并发**：所有变更请求在服务端串行化，等价于**逐次完整执行**，不会丢失其他
   批注的修改；每次成功变更 `revision` 加 1。
 - **读取**：`GET` 返回**同一提交状态**下的固定文本、全部批注（含 `holder`，未持有
@@ -211,9 +220,9 @@ SQLite 数据库在容器内位于 `/data/copies.db`（`docker-compose.yml` 的�
 | --- | --- | --- |
 | POST | `/api/copies` | 入参 `{text, annotations:[{id,start,end,label}]}`（`id` 为唯一字符串），创建副本，返回 **201** 与初始快照（无人持有，`revision=1`）；非法输入 **422** |
 | GET | `/api/copies/{id}` | 返回 `{id, text, revision, annotations:[{id,start,end,label,holder}], groups:[{annotation_ids,holder}]}`；未知副本 **404** |
-| POST | `/api/copies/{id}/annotations/{ann_id}/claim` | 入参 `{reviewer}`，按批注 id **整组领取**，返回最新快照；他人持有 **409**，`reviewer` 非法 **422**，批注 / 副本不存在 **404** |
-| POST | `/api/copies/{id}/annotations/{ann_id}/release` | 入参 `{reviewer}`，**持有者整组释放**；无人持有 / 他人持有 **409**，`reviewer` 非法 **422** |
-| PATCH | `/api/copies/{id}/annotations/{ann_id}` | 入参 `{reviewer, start, end, label}`，仅持有者改单条范围与 label，随后重算分组；触及他人 **409**（范围与持有权均不变），未持有 / 非法区间 / 空 label **409 / 422** |
+| POST | `/api/copies/{id}/annotations/{ann_id}/claim` | 入参 `{reviewer}`，按批注 id **整组领取**，返回最新快照；他人持有 **409**，`reviewer` 非法 **422**，批注 / 副本不存在 **404**。`ann_id` 为任意唯一字符串，路径段须**百分号编码**（`审阅/1` → `%E5%AE%A1%E9%98%85%2F1`，空串 → 相邻两个斜杠，见上文） |
+| POST | `/api/copies/{id}/annotations/{ann_id}/release` | 入参 `{reviewer}`，**持有者整组释放**；无人持有 / 他人持有 **409**，`reviewer` 非法 **422**；`ann_id` 编码规则同 claim |
+| PATCH | `/api/copies/{id}/annotations/{ann_id}` | 入参 `{reviewer, start, end, label}`，仅持有者改单条范围与 label，随后重算分组；触及他人 **409**（范围与持有权均不变），未持有 / 非法区间 / 空 label **409 / 422**。空串 id 的 URL 为 `.../annotations/`（以斜杠结尾）；`/` 与字面 `%2F` 分别写作 `%2F`、`%252F` |
 
 ```bash
 # 创建工作副本：a 与 b 正长度重叠同组；b 与 c 相接不连边；d 独立
@@ -249,6 +258,65 @@ curl -s -X PATCH http://localhost:8000/api/copies/$CID/annotations/c \
 # 读取同一提交状态（含 holder 与连通组），可直接喂给原审阅接口
 curl -s http://localhost:8000/api/copies/$CID
 ```
+
+### 特殊批注 id（空串、含 `/` 与字面 `%2F`）的可执行调用
+
+创建时 `id` 原样存入 JSON 即可；**经 URL 定位**时路径段必须百分号编码
+（`/` → `%2F`、`%` → `%25`、空串 → 相邻两个斜杠），服务端只解码一次，
+`a/b` 与 `a%2Fb` 互不混同：
+
+```bash
+# 创建含三条特殊 id 的副本（区间互不重叠，各自独立成组）：
+# 空串 ""、"审阅/1"（含斜杠）、"a%2Fb"（字面 %2F）
+SID=$(curl -s http://localhost:8000/api/copies \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"0123456789abcdefghij",
+       "annotations":[{"id":"","start":0,"end":2,"label":"空"},
+                      {"id":"审阅/1","start":5,"end":8,"label":"斜"},
+                      {"id":"a%2Fb","start":15,"end":18,"label":"百分"}]}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+# 空串 id：URL 中表现为相邻两个斜杠（.../annotations//claim）
+curl -s -X POST http://localhost:8000/api/copies/$SID/annotations//claim \
+  -H 'Content-Type: application/json' -d '{"reviewer":"alice"}'
+# 空串 id 的 PATCH：URL 以斜杠结尾（.../annotations/）
+curl -s -X PATCH http://localhost:8000/api/copies/$SID/annotations/ \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer":"alice","start":0,"end":2,"label":"空改"}'
+curl -s -X POST http://localhost:8000/api/copies/$SID/annotations//release \
+  -H 'Content-Type: application/json' -d '{"reviewer":"alice"}'
+
+# "审阅/1"：/ 编码为 %2F（中文按 UTF-8 百分号编码）；Python 生成编码后的路径段
+REV=$(python3 -c "from urllib.parse import quote; print(quote('审阅/1', safe=''))")
+# $REV 即 %E5%AE%A1%E9%98%85%2F1
+curl -s -X POST \
+  "http://localhost:8000/api/copies/$SID/annotations/$REV/claim" \
+  -H 'Content-Type: application/json' -d '{"reviewer":"bob"}'
+curl -s -X PATCH \
+  "http://localhost:8000/api/copies/$SID/annotations/$REV" \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer":"bob","start":5,"end":7,"label":"斜改"}'
+curl -s -X POST \
+  "http://localhost:8000/api/copies/$SID/annotations/$REV/release" \
+  -H 'Content-Type: application/json' -d '{"reviewer":"bob"}'
+
+# 字面 id "a%2Fb"：% 再编码为 %25 → a%252Fb；与 id "a/b"（写作 a%2Fb）区分
+curl -s -X POST http://localhost:8000/api/copies/$SID/annotations/a%252Fb/claim \
+  -H 'Content-Type: application/json' -d '{"reviewer":"carol"}'
+curl -s -X PATCH http://localhost:8000/api/copies/$SID/annotations/a%252Fb \
+  -H 'Content-Type: application/json' \
+  -d '{"reviewer":"carol","start":15,"end":17,"label":"百分改"}'
+curl -s -X POST http://localhost:8000/api/copies/$SID/annotations/a%252Fb/release \
+  -H 'Content-Type: application/json' -d '{"reviewer":"carol"}'
+
+# 读取快照：三条特殊 id 原样返回（空串、审阅/1、a%2Fb）
+curl -s http://localhost:8000/api/copies/$SID
+```
+
+Python 客户端可统一用 `urllib.parse.quote(ann_id, safe="")` 生成路径段
+（空串得到空字符串，正好形成相邻两个斜杠）；`requests` / `httpx` 直接把含
+`/` 的原始 id 拼进 URL 时也会自动编码，但**字面 `%2F` 必须自行写作
+`%252F`**，否则会被解码成 `/`。
 
 ## 快速开始（容器一键拉起）
 
@@ -608,9 +676,9 @@ JSON」得到：
 | POST | `/api/redact/export` | 入参 `{text, annotations:[{id,start,end,label}], redact_labels:[…]}`；命中标签的区间重叠或相接即合并，每区替换为一个 `[遮盖]`，命中批注不导出，其余批注跨区拆成可见片段（完全被遮盖的舍弃），返回 `{text, annotations:[{source_id,fragment,start,end,label}], count, redacted_count}`——片段按原批注顺序及原文位置排列，`fragment` 从 1 开始，范围内文字为原文可见部分；无命中时文本与批注范围不变；非法区间 / 空 label / 重复 id / 非法遮盖标签均返回 **422**（不返回部分结果） |
 | POST | `/api/copies` | 可领取审阅工作副本：入参 `{text, annotations:[{id,start,end,label}]}`（唯一字符串 id、非空 label、码点 `[start,end)`），返回 **201** 与初始快照（无人持有、`revision=1`，持久化到 SQLite 挂卷）；非法输入 **422** |
 | GET | `/api/copies/{id}` | 返回同一提交状态 `{id, text, revision, annotations:[{id,start,end,label,holder}], groups:[{annotation_ids,holder}]}`（正长度重叠传递连通、相接不连边）；未知副本 **404** |
-| POST | `/api/copies/{id}/annotations/{ann_id}/claim` | 入参 `{reviewer}`（非空字符串），按批注 id 整组领取（本人重复领取幂等）；他人持有 **409**，非法 reviewer **422**，副本 / 批注不存在 **404** |
-| POST | `/api/copies/{id}/annotations/{ann_id}/release` | 入参 `{reviewer}`，持有者本人整组释放；无人持有 / 他人持有 **409**，非法 reviewer **422** |
-| PATCH | `/api/copies/{id}/annotations/{ann_id}` | 入参 `{reviewer,start,end,label}`，仅持有者改单条范围与 label（不增删批注）后重算分组：并入的未领取批注归本人，触及他人 **409**（范围与持有权均不变），拆开的组保留原持有者；未持有 **409**，非法区间 / 空 label / 非法 reviewer **422**；并发请求等价逐次完整执行 |
+| POST | `/api/copies/{id}/annotations/{ann_id}/claim` | 入参 `{reviewer}`（非空字符串），按批注 id 整组领取（本人重复领取幂等）；他人持有 **409**，非法 reviewer **422**，副本 / 批注不存在 **404**。`ann_id` 为任意唯一字符串（**含空串与含 `/` 的 id**），路径段按标准百分号编码：`审阅/1` → `%E5%AE%A1%E9%98%85%2F1`、字面 `%2F` → `%252F`、空串 → 相邻两个斜杠 |
+| POST | `/api/copies/{id}/annotations/{ann_id}/release` | 入参 `{reviewer}`，持有者本人整组释放；无人持有 / 他人持有 **409**，非法 reviewer **422**；`ann_id` 编码规则同 claim |
+| PATCH | `/api/copies/{id}/annotations/{ann_id}` | 入参 `{reviewer,start,end,label}`，仅持有者改单条范围与 label（不增删批注）后重算分组：并入的未领取批注归本人，触及他人 **409**（范围与持有权均不变），拆开的组保留原持有者；未持有 **409**，非法区间 / 空 label / 非法 reviewer **422**；并发请求等价逐次完整执行。空串 id 的 URL 以斜杠结尾（`.../annotations/`），服务端只解码一次故 `/`（`%2F`）与字面 `%2F`（`%252F`）不混同 |
 
 迁移导出条目状态取值：`shifted` / `matched` / `disambiguated` / `manual` / `abandoned`（废弃项 `start`、`end` 为 `null`）。
 
@@ -801,6 +869,7 @@ tests/
   test_copies.py
   test_copy_store.py
   test_copy_api.py
+  test_copy_special_ids_http.py  # 空串 / 含"/" / 字面"%2F" 特殊 id 的真实 HTTP（uvicorn）全流程回归
   test_validation.py
 Dockerfile
 docker-compose.yml

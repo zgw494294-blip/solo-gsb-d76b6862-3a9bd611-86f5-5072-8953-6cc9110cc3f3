@@ -495,17 +495,21 @@ def read_copy(copy_id: str):
     return _copy_snapshot(lambda: get_store().get(copy_id))
 
 
-@app.post("/api/copies/{copy_id}/annotations/{ann_id}/claim")
+# 批注 id 允许任意唯一字符串（含空串与 "/"）：ann_id 使用 path 转换器，
+# 使斜杠也能作为路径段内容（客户端按标准百分号编码："/" → "%2F"，
+# 字面 "%2F" → "%252F"，空串 → 路径中相邻的两个 "/"）。服务端只做一次
+# 百分号解码，因此 id "a/b" 与 id "a%2Fb" 可区分、不会混同。
+@app.post("/api/copies/{copy_id}/annotations/{ann_id:path}/claim")
 def claim_copy_annotation(copy_id: str, ann_id: str, req: ReviewerIn):
     return _copy_snapshot(lambda: get_store().claim(copy_id, ann_id, req.reviewer))
 
 
-@app.post("/api/copies/{copy_id}/annotations/{ann_id}/release")
+@app.post("/api/copies/{copy_id}/annotations/{ann_id:path}/release")
 def release_copy_annotation(copy_id: str, ann_id: str, req: ReviewerIn):
     return _copy_snapshot(lambda: get_store().release(copy_id, ann_id, req.reviewer))
 
 
-@app.patch("/api/copies/{copy_id}/annotations/{ann_id}")
+@app.patch("/api/copies/{copy_id}/annotations/{ann_id:path}")
 def modify_copy_annotation(copy_id: str, ann_id: str, req: CopyModifyIn):
     return _copy_snapshot(
         lambda: get_store().modify(copy_id, ann_id, req.reviewer,
