@@ -194,9 +194,16 @@
   - 新组**触及其他持有者**的批注 → 返回 **409**，**范围与持有权均不变**；
   - 原组被**拆开**时，各碎片**保留原持有者**；
   - 仅相接（不连边）不视为触及，不冲突。
-- **失败原子性**：非法输入（非字符串 / 空 `id`、空 `label`、`0 ≤ start < end ≤ 文本长度`
+- **失败原子性**：非法输入（非字符串 `id`、空 `label`、`0 ≤ start < end ≤ 文本长度`
   不满足、重复 `id`、空 `reviewer` 等）返回 **422**；任何失败（422 / 409 / 404）
   **都不改变副本**。
+- **特殊批注 id**：`id` 只要是**唯一字符串**即可——**空串**与含 `/` 的 id（如
+  `审阅/1`）均可创建并**原样保留**（创建只拒绝非字符串与重复 `id`）。这类 id
+  无法放入 URL 路径段（`/` 会拆段，`%2F` 在路由匹配前即被解码回 `/`，空串构不成
+  路径段），因此领取 / 释放 / 修改各有对应的**请求体定位**接口：路径不含
+  `{ann_id}`，改在 JSON 请求体里传 `ann_id`，**原样传递、不做任何编解码**
+  （`/` 与 `%2F` 字面量自然区分，互不相混）；请求字段、响应与 404 / 409 / 422
+  语义与路径版完全相同，普通 id 两种写法都可用。
 - **并发**：所有变更请求在服务端串行化，等价于**逐次完整执行**，不会丢失其他
   批注的修改；每次成功变更 `revision` 加 1。
 - **读取**：`GET` 返回**同一提交状态**下的固定文本、全部批注（含 `holder`，未持有
@@ -214,6 +221,9 @@ SQLite 数据库在容器内位于 `/data/copies.db`（`docker-compose.yml` 的�
 | POST | `/api/copies/{id}/annotations/{ann_id}/claim` | 入参 `{reviewer}`，按批注 id **整组领取**，返回最新快照；他人持有 **409**，`reviewer` 非法 **422**，批注 / 副本不存在 **404** |
 | POST | `/api/copies/{id}/annotations/{ann_id}/release` | 入参 `{reviewer}`，**持有者整组释放**；无人持有 / 他人持有 **409**，`reviewer` 非法 **422** |
 | PATCH | `/api/copies/{id}/annotations/{ann_id}` | 入参 `{reviewer, start, end, label}`，仅持有者改单条范围与 label，随后重算分组；触及他人 **409**（范围与持有权均不变），未持有 / 非法区间 / 空 label **409 / 422** |
+| POST | `/api/copies/{id}/annotations/claim` | 入参 `{ann_id, reviewer}`，与路径版 `/claim` 等价，批注 id 经请求体**原样**传递（含 `/` 或空串等特殊 id 用此形式） |
+| POST | `/api/copies/{id}/annotations/release` | 入参 `{ann_id, reviewer}`，请求体定位的整组释放，语义同路径版 |
+| PATCH | `/api/copies/{id}/annotations` | 入参 `{ann_id, reviewer, start, end, label}`，请求体定位的单条修改，语义同路径版 |
 
 ```bash
 # 创建工作副本：a 与 b 正长度重叠同组；b 与 c 相接不连边；d 独立
@@ -248,6 +258,31 @@ curl -s -X PATCH http://localhost:8000/api/copies/$CID/annotations/c \
 
 # 读取同一提交状态（含 holder 与连通组），可直接喂给原审阅接口
 curl -s http://localhost:8000/api/copies/$CID
+```
+
+```bash
+# 特殊批注 id（含 "/" 或空串）：创建原样接受，三项操作经请求体传 ann_id 定位
+CID=$(curl -s http://localhost:8000/api/copies \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"0123456789abcdefghij",
+       "annotations":[{"id":"审阅/1","start":0,"end":4,"label":"甲"},
+                      {"id":"","start":10,"end":13,"label":"乙"}]}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+# 领取 id 为「审阅/1」的批注所在整组（id 在 JSON 请求体中原样传递，无需 URL 编码）
+curl -s -X POST http://localhost:8000/api/copies/$CID/annotations/claim \
+  -H 'Content-Type: application/json' -d '{"ann_id":"审阅/1","reviewer":"alice"}'
+
+# 持有者修改该批注的范围与 label（请求体定位的 PATCH）
+curl -s -X PATCH http://localhost:8000/api/copies/$CID/annotations \
+  -H 'Content-Type: application/json' \
+  -d '{"ann_id":"审阅/1","reviewer":"alice","start":1,"end":4,"label":"甲改"}'
+
+# 空字符串 id 同样经请求体领取 / 释放
+curl -s -X POST http://localhost:8000/api/copies/$CID/annotations/claim \
+  -H 'Content-Type: application/json' -d '{"ann_id":"","reviewer":"bob"}'
+curl -s -X POST http://localhost:8000/api/copies/$CID/annotations/release \
+  -H 'Content-Type: application/json' -d '{"ann_id":"","reviewer":"bob"}'
 ```
 
 ## 快速开始（容器一键拉起）
@@ -611,6 +646,9 @@ JSON」得到：
 | POST | `/api/copies/{id}/annotations/{ann_id}/claim` | 入参 `{reviewer}`（非空字符串），按批注 id 整组领取（本人重复领取幂等）；他人持有 **409**，非法 reviewer **422**，副本 / 批注不存在 **404** |
 | POST | `/api/copies/{id}/annotations/{ann_id}/release` | 入参 `{reviewer}`，持有者本人整组释放；无人持有 / 他人持有 **409**，非法 reviewer **422** |
 | PATCH | `/api/copies/{id}/annotations/{ann_id}` | 入参 `{reviewer,start,end,label}`，仅持有者改单条范围与 label（不增删批注）后重算分组：并入的未领取批注归本人，触及他人 **409**（范围与持有权均不变），拆开的组保留原持有者；未持有 **409**，非法区间 / 空 label / 非法 reviewer **422**；并发请求等价逐次完整执行 |
+| POST | `/api/copies/{id}/annotations/claim` | 入参 `{ann_id, reviewer}`，与路径版 `/claim` 等价；批注 id 经请求体**原样**传递（含 `/`、空串、`%2F` 字面量等无法放入路径段的 id 用此形式，普通 id 亦可用），错误语义相同 |
+| POST | `/api/copies/{id}/annotations/release` | 入参 `{ann_id, reviewer}`，请求体定位的整组释放，语义同路径版 `/release` |
+| PATCH | `/api/copies/{id}/annotations` | 入参 `{ann_id, reviewer, start, end, label}`，请求体定位的单条修改，语义同路径版 PATCH |
 
 迁移导出条目状态取值：`shifted` / `matched` / `disambiguated` / `manual` / `abandoned`（废弃项 `start`、`end` 为 `null`）。
 

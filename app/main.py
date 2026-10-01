@@ -232,6 +232,18 @@ class CopyModifyIn(BaseModel):
     label: NonEmptyStr
 
 
+class CopyAnnIdIn(ReviewerIn):
+    # 任意字符串批注 id 经 JSON 请求体原样传递：含 "/" 或空串等 id 无法
+    # 放入 URL 路径段（"%2F" 在路由匹配前即被解码回 "/"），请求体不做
+    # 任何编解码，"/" 与 "%2F" 字面量自然区分
+    ann_id: str
+
+
+class CopyModifyByIdIn(CopyModifyIn):
+    # 同上：特殊批注 id 经请求体原样传递
+    ann_id: str
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -509,6 +521,31 @@ def release_copy_annotation(copy_id: str, ann_id: str, req: ReviewerIn):
 def modify_copy_annotation(copy_id: str, ann_id: str, req: CopyModifyIn):
     return _copy_snapshot(
         lambda: get_store().modify(copy_id, ann_id, req.reviewer,
+                                   req.start, req.end, req.label))
+
+
+# 特殊批注 id（含 "/" 或空串等）无法放入 URL 路径段："/" 会拆段，"%2F"
+# 在路由匹配前即被解码回 "/"，空串则构不成路径段。以下三个接口与上面的
+# 路径版一一等价，批注 id 改由 JSON 请求体原样传递（任何唯一字符串 id
+# 均可，含普通 id），请求字段、响应与 404 / 409 / 422 语义完全相同。
+
+
+@app.post("/api/copies/{copy_id}/annotations/claim")
+def claim_copy_annotation_by_body(copy_id: str, req: CopyAnnIdIn):
+    return _copy_snapshot(
+        lambda: get_store().claim(copy_id, req.ann_id, req.reviewer))
+
+
+@app.post("/api/copies/{copy_id}/annotations/release")
+def release_copy_annotation_by_body(copy_id: str, req: CopyAnnIdIn):
+    return _copy_snapshot(
+        lambda: get_store().release(copy_id, req.ann_id, req.reviewer))
+
+
+@app.patch("/api/copies/{copy_id}/annotations")
+def modify_copy_annotation_by_body(copy_id: str, req: CopyModifyByIdIn):
+    return _copy_snapshot(
+        lambda: get_store().modify(copy_id, req.ann_id, req.reviewer,
                                    req.start, req.end, req.label))
 
 

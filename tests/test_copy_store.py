@@ -65,6 +65,26 @@ def test_schema_init_is_idempotent(tmp_path):
     CopyStore(db)  # 再次初始化不报错、不破坏数据
 
 
+def test_special_ids_survive_reopen(tmp_path):
+    # 含 "/" / 空串 / "%2F" 字面量的 id 原样落库，重开后仍可读写
+    db = tmp_path / "copies.db"
+    s1 = CopyStore(db)
+    cid = s1.create(TEXT, [ann("审阅/1", 0, 4), ann("", 5, 8),
+                           ann("a%2Fb", 10, 13)])["id"]
+    s1.claim(cid, "审阅/1", "alice")
+    s1.claim(cid, "", "bob")
+
+    s2 = CopyStore(db)  # 模拟容器重启：同一数据库文件重新打开
+    assert _ids_holders(s2.get(cid)) == \
+        {"审阅/1": "alice", "": "bob", "a%2Fb": None}
+    s2.modify(cid, "", "bob", 5, 7, "改")
+    s2.release(cid, "审阅/1", "alice")
+    again = CopyStore(db).get(cid)
+    assert _ids_holders(again) == {"审阅/1": None, "": "bob", "a%2Fb": None}
+    a = [x for x in again["annotations"] if x["id"] == ""][0]
+    assert (a["start"], a["end"], a["label"]) == (5, 7, "改")
+
+
 def test_get_unknown_copy_404(store):
     with pytest.raises(CopyNotFound):
         store.get("deadbeef")
